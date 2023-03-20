@@ -1,19 +1,14 @@
-# Controller Validations
+# Controller Exception Handling
 
 ## Learning Goals
 
-- Check the validity of a model in a controller
-- Render a response with the error messages
-- Use HTTP status codes to provide additional context
+- Use exception handling techniques like `rescue` and `rescue_from` in a Rails
+  controller
 
 ## Introduction
 
-Now that we've seen how Active Record can be used to validate our data, let's
-see how we can use that in our controllers to give our user access to the
-validation errors, so they can fix their typos or other problems with their
-request.
-
-To get set up, run:
+In this lesson, we'll finish work on our Bird API by refactoring the controller
+to add in some helpful reusable error handling code. To get set up, run:
 
 ```console
 $ bundle install
@@ -21,215 +16,301 @@ $ rails db:migrate db:seed
 $ rails s
 ```
 
-## Manually Checking Validation
+This will download all the dependencies for our app, set up the database, and
+run the Rails server.
 
-Up until this point, our `create` action has looked something like this:
+## Video Walkthrough
 
-```rb
-# app/controllers/birds_controller.rb
-def create
-  bird = Bird.create(bird_params)
-  render json: bird, status: :created
-end
-```
+<iframe width="560" height="315" src="https://www.youtube.com/embed/evlSdyGoE3s?rel=0&showinfo=0" frameborder="0" allowfullscreen></iframe>
 
-Let's add some validation to our `Bird` model, so that we don't end up with bad
-data:
+## DRYing Up Controller Code
 
-```rb
-# app/models/bird.rb
-class Bird < ApplicationRecord
-  validates :name, presence: true, uniqueness: true
-end
-```
+In the current implementation of our `BirdsController`, we've defined actions to
+handle all five RESTful routes plus one additional custom route. You'll notice
+there is some common behavior between a lot of the methods. For all the routes
+that include a route parameter (`/birds/:id`), we're using the ID in the params
+hash to look up a bird; if the bird is found, we're performing some action with
+it, and if not, we're sending an error message back.
 
-Now, if we try to create a bird using Postman with bad data, we've got a
-problem!
-
-```json
-{
-  "species": "Archilochus colubris"
-}
-```
-
-Our server still returns a `Bird` object, but we can clearly see that it wasn't
-saved successfully:
-
-```json
-{
-  "id": null,
-  "name": null,
-  "species": "Archilochus colubris",
-  "created_at": null,
-  "updated_at": null,
-  "likes": 0
-}
-```
-
-From this process, we can tell:
-
-- Our model validation prevented this bad data from being saved in the database
-  (yay!)
-- The response doesn't tell us anything about why the data wasn't saved (boo.)
-
-To provide this additional context, we need to update our controller action to
-change the response based on whether or not the bird was saved successfully.
+For example, have a look at the `show` and `update` actions:
 
 ```rb
-def create
-  bird = Bird.create(bird_params)
-  if bird.valid?
-    render json: bird, status: :created
+# GET /birds/:id
+def show
+  bird = Bird.find_by(id: params[:id])
+  if bird
+    render json: bird
   else
-    render json: { errors: bird.errors }, status: :unprocessable_entity
+    render json: { error: "Bird not found" }, status: :not_found
+  end
+end
+
+# PATCH /birds/:id
+def update
+  bird = Bird.find_by(id: params[:id])
+  if bird
+    bird.update(bird_params)
+    render json: bird
+  else
+    render json: { error: "Bird not found" }, status: :not_found
   end
 end
 ```
 
-Now, we get a different response after sending that same request in Postman:
+Between these two methods, there's a good amount of repeated code:
 
-```json
-{
-  "errors": {
-    "name": ["can't be blank"]
-  }
-}
-```
+- Finding a bird based on the ID
+- Performing control flow (if/else) based on whether or not the bird exists
+- Returning an error message with a status of `:not_found` if the bird doesn't
+  exist
 
-From the controller, `bird.errors` will give a serializable object with all the
-error messages from our Active Record validations.
+That same code also exists in the `increment_likes` and `destroy` actions. That
+makes this a good opportunity for a refactor to DRY up some of this repeated
+logic!
 
-We also included the status code of [422 Unprocessable Entity][422], indicating
-this was a bad request.
-
-[422]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/422
-
-We can clean up this controller action by handling the
-`ActiveRecord::RecordInvalid` exception class along with `create!` or `update!`:
+Let's start by making a private method for generating the `:not_found` response:
 
 ```rb
-def create
-  bird = Bird.create!(bird_params)
-  render json: bird, status: :created
-rescue ActiveRecord::RecordInvalid => invalid
-  render json: { errors: invalid.record.errors }, status: :unprocessable_entity
+private
+
+def render_not_found_response
+  render json: { error: "Bird not found" }, status: :not_found
 end
 ```
 
-In the `rescue` block, the `invalid` variable is an instance of the exception
-itself. From that `invalid` variable, we can access the actual Active Record
-instance with the `record` method, where we can retrieve its errors.
+We can then update our actions to use this method instead of implementing the
+rendering logic directly:
 
-We can take a similar approach to validation in our `update` method, since
-validations will also run when a model is updated:
+```rb
+# GET /birds/:id
+def show
+  bird = Bird.find_by(id: params[:id])
+  if bird
+    render json: bird
+  else
+    render_not_found_response
+  end
+end
+
+# PATCH /birds/:id
+def update
+  bird = Bird.find_by(id: params[:id])
+  if bird
+    bird.update(bird_params)
+    render json: bird
+  else
+    render_not_found_response
+  end
+end
+```
+
+We can also make a helper method to find a bird based on the ID in the params
+hash:
+
+```rb
+private
+
+def find_bird
+  Bird.find_by(id: params[:id])
+end
+```
+
+Now, our controller actions don't need to worry about how the `find_bird` method
+is implemented, as long as it returns a bird from the database. This frees us up
+to change how the bird finding logic is implemented in the future (for example,
+using something other than the ID to look up a bird in the database, like a URL
+slug or [UUID][uuid]).
+
+Here's how our controller actions can use this method:
+
+```rb
+# GET /birds/:id
+def show
+  bird = find_bird
+  if bird
+    render json: bird
+  else
+    render_not_found_response
+  end
+end
+
+# PATCH /birds/:id
+def update
+  bird = find_bird
+  if bird
+    bird.update(bird_params)
+    render json: bird
+  else
+    render_not_found_response
+  end
+end
+```
+
+## Handling Exceptions
+
+We can also shorten up the code in each of our controller methods by using a
+different approach to finding a bird using the ID. This will also help us
+improve our error handling. Currently, we're using the [`find_by`][find_by]
+method to look up a bird. `find_by` returns `nil` if the record isn't found in
+the database, which makes it useful for `if/else` control flow, since `nil` is a
+false-y value in Ruby.
+
+If we use the [`find`][find] method instead, we'll get an
+`ActiveRecord::RecordNotFound` exception instead of `nil` when the record
+doesn't exist. Try updating the `find_bird` action like this:
+
+```rb
+def find_bird
+  Bird.find(params[:id])
+end
+```
+
+Then make a request for an ID that doesn't exist in the database, like
+`localhost:3000/birds/9999`. You should see an error message like this:
+
+```txt
+ActiveRecord::RecordNotFound (Couldn't find Bird with 'id'=9999)
+```
+
+We can handle this error in our controller method by using a
+[`rescue` block in our method][ruby method exception syntax], like so:
+
+```rb
+def show
+  bird = find_bird
+  render json: bird
+rescue ActiveRecord::RecordNotFound
+  render_not_found_response
+end
+```
+
+Not only is this code shorter than the previous implementation, it also gives a
+clearer separation between the "happy path" of our code (no exceptions/errors)
+and the logic for handling exceptions/errors. Try making the same request in the
+browser to `localhost:3000/birds/9999` — now that we're handling the exception
+in the controller, you should see a 404 status code in the console with the `{ "error": "Bird not found" }` JSON response instead of a 500 server error.
+
+We use the same approach to our `update` action as well:
 
 ```rb
 def update
   bird = find_bird
-  bird.update!(bird_params)
+  bird.update(bird_params)
   render json: bird
-rescue ActiveRecord::RecordInvalid => invalid
-  render json: { errors: invalid.record.errors }, status: :unprocessable_entity
+rescue ActiveRecord::RecordNotFound
+  render_not_found_response
 end
 ```
 
-We could also handle **all** `ActiveRecord::RecordInvalid` exceptions in the
-controller with the `rescue_from` method. We'll add it along with the
-`rescue_from` that we already implemented for `ActiveRecord::RecordNotFound`:
+The tradeoff to this approach of using exception handling rather than an if/else
+control flow is that it may be less apparent to other developers looking at our
+code at first what code in the `update` block would cause that exception to be
+thrown.
+
+We can take this one step further, and use the [`rescue_from` method][rescue_from]
+to handle the `ActiveRecord::RecordNotFound` exception from **all** of our controller
+actions:
 
 ```rb
 class BirdsController < ApplicationController
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found_response
-  # added rescue_from
-  rescue_from ActiveRecord::RecordInvalid, with: :render_unprocessable_entity_response
 
-  # rest of controller actions...
+  # rest of controller...
+end
+```
+
+By using the `rescue_from` method this way, if _any_ of our controller actions
+throw an `ActiveRecord::RecordNotFound` exception, our
+`render_not_found_response` method will return the appropriate JSON response.
+
+Here's the fully refactored version of the controller:
+
+```rb
+class BirdsController < ApplicationController
+  rescue_from ActiveRecord::RecordNotFound, with: :render_not_found_response
+
+  # GET /birds
+  def index
+    birds = Bird.all
+    render json: birds
+  end
+
+  # POST /birds
+  def create
+    bird = Bird.create(bird_params)
+    render json: bird, status: :created
+  end
+
+  # GET /birds/:id
+  def show
+    bird = find_bird
+    render json: bird
+  end
+
+  # PATCH /birds/:id
+  def update
+    bird = find_bird
+    bird.update(bird_params)
+    render json: bird
+  end
+
+  # PATCH /birds/:id/like
+  def increment_likes
+    bird = find_bird
+    bird.update(likes: bird.likes + 1)
+    render json: bird
+  end
+
+  # DELETE /birds/:id
+  def destroy
+    bird = find_bird
+    bird.destroy
+    head :no_content
+  end
 
   private
 
-  def render_unprocessable_entity_response(invalid)
-    render json: { errors: invalid.record.errors }, status: :unprocessable_entity
+  def find_bird
+    Bird.find(params[:id])
   end
 
-  # rest of private methods...
+  def bird_params
+    params.permit(:name, :species, :likes)
+  end
+
+  def render_not_found_response
+    render json: { error: "Bird not found" }, status: :not_found
+  end
+
 end
 ```
-
-Now, our `create` and `update` actions can focus on the happy path:
-
-```rb
-def create
-  # create! exceptions will be handled by the rescue_from ActiveRecord::RecordInvalid code
-  bird = Bird.create!(bird_params)
-  render json: bird, status: :created
-end
-
-def update
-  bird = find_bird
-  # update! exceptions will be handled by the rescue_from ActiveRecord::RecordInvalid code
-  bird.update!(bird_params)
-  render json: bird
-end
-```
-
-## Formatting the Error Response
-
-When we're sending back error messages, we should take care to format the error
-messages in a way that can be easily displayed by our frontend. Take another
-look at the current implementation:
-
-```rb
-render json: { errors: invalid.record.errors }, status: :unprocessable_entity
-```
-
-This will return a JSON object in the body of the response with a key of `errors`
-pointing to a nested object where the **keys** are the invalid attributes, and
-**values** are the validation error messages, like this:
-
-```json
-{
-  "errors": {
-    "name": ["can't be blank"],
-    "species": ["must be unique"]
-  }
-}
-```
-
-We could also return a different format by using the `#full_messages` method
-to output an array of pre-formatted error messages:
-
-```rb
-render json: { errors: invalid.record.errors.full_messages }, status: :unprocessable_entity
-```
-
-That would produce a slightly different output:
-
-```json
-{
-  "errors": ["Name can't be blank", "Species must be unique"]
-}
-```
-
-Notice in either case, the key on our JSON object is `errors` since we are
-returning a collection of error messages (either an object or an array).
-
-Which format you choose will depend largely on how you plan on using this data
-on the frontend. It's good to know you have options!
 
 ## Conclusion
 
-With model validations in place, we can help protect our database against bad
-data. Active Record validations also help provide **error messages** to indicate
-why a certain value wasn't considered valid data. We can access the model's
-validity and error messages in the controller. By sending this data in the
-response, we'll be able to provide additional context to our clients about what
-went wrong with their request so they can fix it.
+Using exception handling techniques like `rescue` and `rescue_from` opens up a
+lot of possibilities in terms of how you structure your code. For our controller
+actions in particular, it allows us to isolate the "happy path" of our code
+(performing CRUD actions and rendering a response to the users) from the
+exception handling logic. It also lets us handle exceptions in a consistent way,
+so that users of our API get the same response for common errors, like not being
+able to find a particular resource.
 
 ## Check For Understanding
 
 Before you move on, make sure you can answer the following questions:
 
-1. If we have Active Record validations in place, what is the difference in how
-   validation errors will be handled if we use `create` vs. `create!`?
-2. In the following line of code, what is the `invalid` variable and how can we
-   use it: `rescue ActiveRecord::RecordInvalid => invalid`?
+1. What is the difference in behavior between the `find` and `find_by` methods?
+   Why is that difference important for how we handle not-found errors?
+2. Looking at the final version of the controller code, what sequence of events
+   would happen if we tried to submit a `PATCH` request for a bird that doesn't
+   exist?
+
+## Resources
+
+- [`rescue_from` method][rescue_from]
+
+[uuid]: https://en.wikipedia.org/wiki/Universally_unique_identifier
+[find_by]: https://api.rubyonrails.org/v6.1.3.2/classes/ActiveRecord/FinderMethods.html#method-i-find_by
+[find]: https://api.rubyonrails.org/v6.1.3.2/classes/ActiveRecord/FinderMethods.html#method-i-find
+[ruby method exception syntax]: https://ruby-doc.org/core-2.7.3/doc/syntax/exceptions_rdoc.html
+[rescue_from]: https://api.rubyonrails.org/classes/ActiveSupport/Rescuable/ClassMethods.html#method-i-rescue_from
